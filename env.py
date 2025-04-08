@@ -1,107 +1,100 @@
 import gymnasium as gym
 import numpy as np
 import pygame
-from collections import defaultdict
 
 class TreasureGuardianEnv(gym.Env):
-    def __init__(self, grid_size=10, num_villains=3, num_keys=5, num_pits=3, 
+    metadata = {"render_modes": ["human"], "render_fps": 10}
+
+    def __init__(self, grid_size=10, num_villains=3, num_keys=5, num_pits=3,
                  max_steps=100, render_mode=None, wall_percentage=0.15):
         super().__init__()
-        
         self.grid_size = grid_size
         self.num_villains = num_villains
         self.num_keys = num_keys
-        self.num_pits = num_pits         # New parameter for pits
+        self.num_pits = num_pits
         self.max_steps = max_steps
         self.render_mode = render_mode
         self.wall_percentage = wall_percentage
-        
+
+        # Action and observation spaces
         self.action_space = gym.spaces.Dict({
             "guardian": gym.spaces.Discrete(4),
             "villains": gym.spaces.MultiDiscrete([4] * num_villains)
         })
-        
+
+        num_walls = int(grid_size * grid_size * wall_percentage)
         self.observation_space = gym.spaces.Dict({
-            "guardian": gym.spaces.Box(low=0, high=grid_size-1, shape=(2,), dtype=np.int32),
-            "villains": gym.spaces.Box(low=0, high=grid_size-1, shape=(num_villains, 2), dtype=np.int32),
-            "keys": gym.spaces.Box(low=0, high=grid_size-1, shape=(num_keys, 2), dtype=np.int32),
-            "walls": gym.spaces.Box(low=0, high=grid_size-1, 
-                                      shape=(int(grid_size**2 * wall_percentage), 2), dtype=np.int32),
-            "treasure": gym.spaces.Box(low=0, high=grid_size-1, shape=(2,), dtype=np.int32),
-            "pits": gym.spaces.Box(low=0, high=grid_size-1, shape=(num_pits, 2), dtype=np.int32)
+            "guardian": gym.spaces.Box(0, grid_size - 1, (2,), dtype=np.int32),
+            "villains": gym.spaces.Box(0, grid_size - 1, (num_villains, 2), dtype=np.int32),
+            "keys": gym.spaces.Box(0, grid_size - 1, (num_keys, 2), dtype=np.int32),
+            "walls": gym.spaces.Box(0, grid_size - 1, (num_walls, 2), dtype=np.int32),
+            "treasure": gym.spaces.Box(0, grid_size - 1, (2,), dtype=np.int32),
+            "pits": gym.spaces.Box(0, grid_size - 1, (num_pits, 2), dtype=np.int32),
         })
 
         self.cell_size = 50
         self.colors = {
             "background": (255, 255, 255),
-            "guardian": (0, 0, 255),       # Blue
-            "villains": (255, 0, 0),       # Red
-            "keys": (255, 215, 0),         # Gold
-            "walls": (170, 170, 170),      # Gray
-            "treasure": (0, 255, 0),       # Green
-            "pits": (0, 0, 0),             # Black
-            "grid": (200, 200, 200)
+            "guardian": (0, 0, 255),
+            "villains": (255, 0, 0),
+            "keys": (255, 215, 0),
+            "walls": (170, 170, 170),
+            "treasure": (0, 255, 0),
+            "pits": (0, 0, 0),
         }
-        
-        if self.render_mode == "human":
+
+        if render_mode == "human":
             pygame.init()
-            self.screen = pygame.display.set_mode((self.grid_size * self.cell_size, 
-                                                    self.grid_size * self.cell_size))
-            self.clock = pygame.time.Clock()
+            size = grid_size * self.cell_size
+            self.screen = pygame.display.set_mode((size, size))
             pygame.display.set_caption("Treasure Guardian")
-        
+            self.clock = pygame.time.Clock()
+
         self.reset()
-    
-    def reset(self):
-        self.occupied = set()
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self.occupied = {(0, 0)}
         self.walls = self._generate_walls()
-        # Generate pits after walls so that keys avoid both.
         self.pits = self._generate_positions(self.num_pits, self.occupied)
         self.guardian_pos = np.array([0, 0], dtype=np.int32)
         self.occupied.add((0, 0))
         self.villains_pos = self._generate_positions(self.num_villains, self.occupied)
-        # Track whether each villain holds a key (initially none).
-        self.villain_has_key = [False] * len(self.villains_pos)
+        self.villain_has_key = [False] * self.num_villains
         self.keys = self._generate_positions(self.num_keys, self.occupied)
-        self.treasure = self._generate_positions(1, self.occupied)[0]  # Place treasure
+        self.treasure = self._generate_positions(1, self.occupied)[0]
         self.current_step = 0
         self.total_keys_held = 0
-        self.keys_collected = set()
-        return self._get_obs()
-    
+        return self._get_obs(), {}
+
     def _generate_walls(self):
-        num_walls = int(self.grid_size**2 * self.wall_percentage)
+        n = int(self.grid_size * self.grid_size * self.wall_percentage)
         walls = set()
-        while len(walls) < num_walls:
+        while len(walls) < n:
             pos = (np.random.randint(self.grid_size), np.random.randint(self.grid_size))
             if pos not in self.occupied:
                 walls.add(pos)
                 self.occupied.add(pos)
         return np.array(list(walls), dtype=np.int32)
-    
+
     def _generate_positions(self, count, occupied):
-        positions = []
-        while len(positions) < count:
+        lst = []
+        while len(lst) < count:
             pos = (np.random.randint(self.grid_size), np.random.randint(self.grid_size))
             if pos not in occupied:
-                positions.append(pos)
+                lst.append(pos)
                 occupied.add(pos)
-        return np.array(positions, dtype=np.int32)
-    
+        return np.array(lst, dtype=np.int32)
+
     def _respawn_key(self):
-        # Generate a valid position for a key (avoid walls and pits).
-        valid = False
-        while not valid:
+        while True:
             pos = (np.random.randint(self.grid_size), np.random.randint(self.grid_size))
-            if pos in map(tuple, self.walls) or pos in map(tuple, self.pits):
-                continue
-            if np.array_equal(np.array(pos, dtype=np.int32), self.guardian_pos):
-                continue
-            if any(np.array_equal(np.array(pos, dtype=np.int32), villain) for villain in self.villains_pos):
-                continue
-            valid = True
-        return np.array(pos, dtype=np.int32)
-    
+            if (pos not in map(tuple, self.walls)
+                and pos not in map(tuple, self.pits)
+                and not np.array_equal(pos, self.guardian_pos)
+                and all(not np.array_equal(pos, v) for v in self.villains_pos)):
+                return np.array(pos, dtype=np.int32)
+
     def _get_obs(self):
         return {
             "guardian": self.guardian_pos.copy(),
@@ -111,180 +104,123 @@ class TreasureGuardianEnv(gym.Env):
             "treasure": self.treasure.copy(),
             "pits": self.pits.copy()
         }
-    
+
     def _move_agent(self, pos, action):
-        # Guardian movement is only blocked by walls.
         x, y = pos
-        new_pos = pos.copy()
-        if action == 0:  # Up
-            new_pos[1] = max(0, y - 1)
-        elif action == 1:  # Down
-            new_pos[1] = min(self.grid_size - 1, y + 1)
-        elif action == 2:  # Left
-            new_pos[0] = max(0, x - 1)
-        elif action == 3:  # Right
-            new_pos[0] = min(self.grid_size - 1, x + 1)
-        if tuple(new_pos) in map(tuple, self.walls):
-            return pos
-        return new_pos
-    
-    def _move_villain(self, pos, action):
-        # Villain movement is blocked by walls.
-        x, y = pos
-        new_pos = pos.copy()
-        if action == 0:
-            new_pos[1] = max(0, y - 1)
-        elif action == 1:
-            new_pos[1] = min(self.grid_size - 1, y + 1)
-        elif action == 2:
-            new_pos[0] = max(0, x - 1)
-        elif action == 3:
-            new_pos[0] = min(self.grid_size - 1, x + 1)
-        if tuple(new_pos) in map(tuple, self.walls):
-            return pos, False  # Movement blocked by wall.
-        return new_pos, False
-    
+        if action == 0: y = max(0, y - 1)
+        elif action == 1: y = min(self.grid_size - 1, y + 1)
+        elif action == 2: x = max(0, x - 1)
+        elif action == 3: x = min(self.grid_size - 1, x + 1)
+        new = np.array((x, y), dtype=np.int32)
+        return pos if tuple(new) in map(tuple, self.walls) else new
+
     def step(self, actions):
         self.current_step += 1
-        guardian_reward = -0.1
-        villains_reward = -0.1 * len(self.villains_pos)
+        g_r = -0.1
+        v_r = -0.1 * len(self.villains_pos)
         info = {}
-        
-        # Move guardian.
+
         self.guardian_pos = self._move_agent(self.guardian_pos, actions["guardian"])
-        
-        # Check if guardian falls into a pit.
-        if any(np.array_equal(self.guardian_pos, pit) for pit in self.pits):
-            guardian_reward -= 10
+
+        if any(np.array_equal(self.guardian_pos, p) for p in self.pits):
+            g_r -= 10
             info["result"] = "villains_win"
-            return self._get_obs(), (guardian_reward, villains_reward), True, info
-        
-        # Check for collisions: if guardian catches any villain.
-        remaining_villains = []
-        remaining_villain_keys = []
-        for i, villain in enumerate(self.villains_pos):
-            if np.array_equal(self.guardian_pos, villain):
-                guardian_reward += 5      # +5 for catching villain.
-                villains_reward -= 5      # Villains penalized.
-                # If the caught villain was holding a key, drop it.
+            return self._get_obs(), (g_r, v_r), True, info
+
+        survivors, survivor_keys = [], []
+        for i, v in enumerate(self.villains_pos):
+            if np.array_equal(self.guardian_pos, v):
+                g_r += 5
+                v_r -= 5
                 if self.villain_has_key[i]:
-                    new_key = self._respawn_key()
-                    self.keys = np.concatenate([self.keys, np.array([new_key], dtype=np.int32)], axis=0)
                     self.total_keys_held -= 1
-                # Do not add the caught villain.
             else:
-                remaining_villains.append(villain)
-                remaining_villain_keys.append(self.villain_has_key[i])
-        self.villains_pos = np.array(remaining_villains, dtype=np.int32)
-        self.villain_has_key = remaining_villain_keys
-        
-        # Move villains and handle key collection and pit elimination.
-        new_villains = []
-        new_villain_keys = []
-        for i, villain in enumerate(self.villains_pos):
-            new_pos, _ = self._move_villain(villain, actions["villains"][i])
-            # Check if villain falls into a pit.
-            if any(np.array_equal(new_pos, pit) for pit in self.pits):
-                villains_reward -= 10  # Penalty for falling in pit.
-                continue  # Eliminate villain.
-            # Check key collection.
-            if (not self.villain_has_key[i]) and any(np.array_equal(new_pos, key) for key in self.keys):
-                villains_reward += 5  # Reward for collecting a key.
-                new_villain_keys.append(True)
+                survivors.append(v)
+                survivor_keys.append(self.villain_has_key[i])
+        self.villains_pos = np.array(survivors, dtype=np.int32)
+        self.villain_has_key = survivor_keys
+
+        new_vs, new_vk = [], []
+        for i, v in enumerate(self.villains_pos):
+            new_pos = self._move_agent(v, actions["villains"][i])
+            if any(np.array_equal(new_pos, p) for p in self.pits):
+                v_r -= 10
+                continue
+            if (not self.villain_has_key[i]) and any(np.array_equal(new_pos, k) for k in self.keys):
+                v_r += 5
+                new_vk.append(True)
                 self.total_keys_held += 1
-                # Remove the collected key from the board.
                 self.keys = np.array([k for k in self.keys if not np.array_equal(k, new_pos)], dtype=np.int32)
+                self.keys = np.vstack([self.keys, self._respawn_key()])
             else:
-                new_villain_keys.append(self.villain_has_key[i])
-            new_villains.append(new_pos)
-        self.villains_pos = np.array(new_villains, dtype=np.int32)
-        self.villain_has_key = new_villain_keys
-        
-        # Terminal conditions:
-        # Guardian wins if all villains are eliminated.
+                new_vk.append(self.villain_has_key[i])
+            new_vs.append(new_pos)
+
+        self.villains_pos = np.array(new_vs, dtype=np.int32)
+        self.villain_has_key = new_vk
+
         if len(self.villains_pos) == 0:
-            guardian_reward += 50
+            g_r += 50
             info["result"] = "guardian_win"
-            return self._get_obs(), (guardian_reward, villains_reward), True, info
-        # Villains win if they have collected all keys and any villain reaches the treasure.
+            return self._get_obs(), (g_r, v_r), True, info
+
         if self.total_keys_held == self.num_keys and any(np.array_equal(v, self.treasure) for v in self.villains_pos):
-            villains_reward += 10
+            v_r += 10
             info["result"] = "villains_win"
-            return self._get_obs(), (guardian_reward, villains_reward), True, info
-        # Timeout condition.
+            return self._get_obs(), (g_r, v_r), True, info
+
         if self.current_step >= self.max_steps:
             info["result"] = "timeout"
-            return self._get_obs(), (guardian_reward, villains_reward), True, info
-        
-        return self._get_obs(), (guardian_reward, villains_reward), False, info
-    
+            return self._get_obs(), (g_r, v_r), True, info
+
+        return self._get_obs(), (g_r, v_r), False, info
+
     def render(self):
         if self.render_mode != "human":
             return
         self.screen.fill(self.colors["background"])
-        # Draw walls.
         for x, y in self.walls:
             pygame.draw.rect(self.screen, self.colors["walls"], (x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size))
-        # Draw pits.
         for x, y in self.pits:
             pygame.draw.rect(self.screen, self.colors["pits"], (x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size))
-        # Draw keys.
         for x, y in self.keys:
             pygame.draw.rect(self.screen, self.colors["keys"], (x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size))
-        # Draw treasure.
-        pygame.draw.rect(self.screen, self.colors["treasure"], (self.treasure[0] * self.cell_size, self.treasure[1] * self.cell_size, self.cell_size, self.cell_size))
-        # Draw guardian.
-        pygame.draw.rect(self.screen, self.colors["guardian"], (self.guardian_pos[0] * self.cell_size, self.guardian_pos[1] * self.cell_size, self.cell_size, self.cell_size))
-        # Draw villains.
+        tx, ty = self.treasure
+        pygame.draw.rect(self.screen, self.colors["treasure"], (tx * self.cell_size, ty * self.cell_size, self.cell_size, self.cell_size))
+        gx, gy = self.guardian_pos
+        pygame.draw.rect(self.screen, self.colors["guardian"], (gx * self.cell_size, gy * self.cell_size, self.cell_size, self.cell_size))
         for x, y in self.villains_pos:
             pygame.draw.rect(self.screen, self.colors["villains"], (x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size))
         pygame.display.flip()
-        self.clock.tick(10)
-    
+        self.clock.tick(self.metadata["render_fps"])
+
     def close(self):
         if self.render_mode == "human":
             pygame.quit()
 
-if __name__ == "__main__":
-    # Initialize the environment.
-    env = TreasureGuardianEnv(
-        grid_size=10,
-        num_villains=3,
-        num_keys=5,
-        num_pits=3,
-        render_mode="human",
-        max_steps=200
-    )
 
+if __name__ == "__main__":
+    env = TreasureGuardianEnv(grid_size=10, num_villains=3, num_keys=5, num_pits=3, render_mode="human", max_steps=200)
     print("Starting example run...")
-    
-    for episode in range(5):  # Run 2 episodes.
-        obs = env.reset()
+
+    for episode in range(5):
+        obs, _ = env.reset()
         done = False
-        total_guardian_reward = 0
-        total_villain_reward = 0
+        g_total, v_total = 0, 0
 
         while not done:
-            # Random actions for guardian and villains.
-            actions = {
-                "guardian": np.random.randint(4),
-                "villains": np.random.randint(4, size=len(obs["villains"]))
-            }
-            obs, rewards, done, info = env.step(actions)
-            total_guardian_reward += rewards[0]
-            total_villain_reward += rewards[1]
+            guardian_action = np.random.randint(4)
+            villain_action = np.random.randint(4, size=len(obs["villains"])) if len(obs["villains"]) > 0 else np.array([])
+            actions = {"guardian": guardian_action, "villains": villain_action}
+            obs, (g_r, v_r), done, info = env.step(actions)
+            g_total += g_r
+            v_total += v_r
             env.render()
-            
-            if done:
-                print(f"\nEpisode {episode+1} ended after {env.current_step} steps")
-                print(f"Result: {info.get('result', 'unknown')}")
-                print(f"Total Guardian Reward: {total_guardian_reward:.2f}")
-                print(f"Total Villain Reward: {total_villain_reward:.2f}")
-                break
-    
+
+        print(f"\nEpisode {episode + 1} ended after {env.current_step} steps")
+        print(f"Result: {info.get('result', 'unknown')}")
+        print(f"Total Guardian Reward: {g_total:.2f}")
+        print(f"Total Villain Reward: {v_total:.2f}")
+
     env.close()
-    print("\nExample run completed!")
-
-
-
-    
+    print("Example run completed!")

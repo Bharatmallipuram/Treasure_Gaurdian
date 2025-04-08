@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from env import TreasureGuardianEnv
+from old_env import TreasureGuardianEnv
 
 # Keys for flattening
 FIXED_KEYS = ["guardian", "keys", "pits", "treasure", "villains", "walls"]

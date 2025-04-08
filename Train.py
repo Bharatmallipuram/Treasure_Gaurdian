@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 # Import your environment from env.py
-from env import TreasureGuardianEnv
+from old_env import TreasureGuardianEnv
 
 
 # Fixed Keys and Helper: Flatten the Environment Observation
