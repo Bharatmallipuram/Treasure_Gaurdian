@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 import pygame
 
-class BaseTreasureGuardianEnv(gym.Env):
+class TreasureGuardianEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 10}
 
     def __init__(self, grid_size=10, num_villains=1, num_keys=3, num_pits=2,
@@ -249,7 +249,7 @@ class BaseTreasureGuardianEnv(gym.Env):
 
 # Variant: Light Theme with Square Walls and Updated Game Logic
 
-class LightTreasureGuardianEnv(BaseTreasureGuardianEnv):
+class LightTreasureGuardianEnv(TreasureGuardianEnv):
     def __init__(self, **kwargs):
         colors = {
             "background": (10, 10, 30),         # Deep Space Blue
