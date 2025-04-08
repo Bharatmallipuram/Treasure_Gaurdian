@@ -264,14 +264,14 @@ class LightTreasureGuardianEnv(BaseTreasureGuardianEnv):
 
         super().__init__(colors=colors, **kwargs)
 
-# ----------------------------
+
 # Main testing code for the Light Variant with Updated Logic
-# ----------------------------
+
 if __name__ == "__main__":
     env = LightTreasureGuardianEnv(render_mode="human", max_steps=200)
 
     episodes = 3
-    for episode in range(episodes):
+    for episode in range(episodes): 
         obs, _ = env.reset()
         done = False
         g_total, v_total = 0, 0
