@@ -112,24 +112,22 @@ class MADDPG:
 
         self.buffer = ReplayBuffer(buffer_size)
 
-        def act(self, obs, explore=True):
-            """
-            obs: List or array of observations for each agent, length = num_agents
-            Returns: List of actions for each agent
-            """
-            actions = []
-            for i, agent in enumerate(self.agents):
-                obs_tensor = torch.tensor(obs[i], dtype=torch.float32).unsqueeze(0).to(device)
-                logits = agent.actor(obs_tensor)
-                probs = torch.softmax(logits, dim=-1)
-
-                if explore:
-                    action = torch.multinomial(probs, 1).item()
-                else:
-                    action = torch.argmax(probs, dim=-1).item()
-
-                actions.append(action)
-            return actions
+    def act(self, obs, explore=True):
+        """
+        obs: List or array of observations for each agent, length = num_agents
+        Returns: List of actions for each agent
+        """
+        actions = []
+        for i, agent in enumerate(self.agents):
+            obs_tensor = torch.tensor(obs[i], dtype=torch.float32).unsqueeze(0).to(device)
+            logits = agent.actor(obs_tensor)
+            probs = torch.softmax(logits, dim=-1)
+            if explore:
+                action = torch.multinomial(probs, 1).item()
+            else:
+                action = torch.argmax(probs, dim=-1).item()
+            actions.append(action)
+        return actions
 
 
     def step(self, obs, actions, rewards, next_obs, dones):
