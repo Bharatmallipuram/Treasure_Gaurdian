@@ -1,200 +1,225 @@
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
+
+import time
 import random
 from collections import deque
+from env import TreasureGuardianEnv, LightTreasureGuardianEnv
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Actor Network
+# MADDPG Implementation
 class Actor(nn.Module):
-    def __init__(self, obs_dim, action_dim, hidden_dim=128):
+    def __init__(self, state_dim, action_dim):
         super(Actor, self).__init__()
-        self.fc1 = nn.Linear(obs_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.out = nn.Linear(hidden_dim, action_dim)  # Discrete: logits
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, action_dim)
+        )
+    
+    def forward(self, state):
+        return F.softmax(self.net(state), dim=-1)
 
-    def forward(self, obs):
-        x = torch.relu(self.fc1(obs))
-        x = torch.relu(self.fc2(x))
-        return self.out(x)  # Logits
-
-# Critic Network
 class Critic(nn.Module):
-    def __init__(self, total_obs_dim, total_action_dim, hidden_dim=128):
+    def __init__(self, state_dim, action_dim, num_agents):
         super(Critic, self).__init__()
-        self.fc1 = nn.Linear(total_obs_dim + total_action_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.out = nn.Linear(hidden_dim, 1)
+        self.total_actions = num_agents * action_dim
+        self.net = nn.Sequential(
+            nn.Linear(state_dim + self.total_actions, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+    
+    def forward(self, state, actions):
+        return self.net(torch.cat([state, actions], dim=1))
 
-    def forward(self, obs_all, actions_all):
-        x = torch.cat([obs_all, actions_all], dim=1)
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.out(x)
+class MADDPGAgent:
+    def __init__(self, state_dim, action_dim, num_agents, agent_idx):
+        self.actor = Actor(state_dim, action_dim)
+        self.actor_target = Actor(state_dim, action_dim)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_optim = optim.Adam(self.actor.parameters(), lr=0.001)
 
-# Replay Buffer
+        self.critic = Critic(state_dim, action_dim, num_agents)
+        self.critic_target = Critic(state_dim, action_dim, num_agents)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.critic_optim = optim.Adam(self.critic.parameters(), lr=0.001)
+
+        self.action_dim = action_dim
+        self.agent_idx = agent_idx
+        self.num_agents = num_agents
+
+    def act(self, state, epsilon=0.0):
+        if random.random() < epsilon:
+            return random.randint(0, self.action_dim - 1)
+        state = torch.FloatTensor(state)
+        with torch.no_grad():
+            probs = self.actor(state)
+        return torch.argmax(probs).item()
+
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
-
-    def push(self, obs, actions, rewards, next_obs, dones):
-        self.buffer.append((obs, actions, rewards, next_obs, dones))
-
+    
+    def push(self, state, actions, rewards, next_state, done):
+        self.buffer.append((state, actions, rewards, next_state, done))
+    
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        obs, actions, rewards, next_obs, dones = map(np.array, zip(*batch))
-        return obs, actions, rewards, next_obs, dones
-
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(dones)
+    
     def __len__(self):
         return len(self.buffer)
 
-# Agent
-class Agent:
-    def __init__(self, obs_dim, action_dim, total_obs_dim, total_action_dim, lr=1e-3, tau=0.01, gamma=0.95):
-        self.actor = Actor(obs_dim, action_dim).to(device)
-        self.target_actor = Actor(obs_dim, action_dim).to(device)
-        self.critic = Critic(total_obs_dim, total_action_dim).to(device)
-        self.target_critic = Critic(total_obs_dim, total_action_dim).to(device)
 
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
+# Helper Functions and Training Parameters
+def pad_array(arr, target_len):
+    flat = arr.flatten()
+    if len(flat) < target_len:
+        flat = np.concatenate([flat, np.zeros(target_len - len(flat))])
+    return flat
 
-        self.tau = tau
-        self.gamma = gamma
-        self.action_dim = action_dim
+GRID_SIZE = 10
+NUM_VILLAINS = 1
+NUM_KEYS = 1
+NUM_PITS = 2
+WALL_PERCENT = 0.15
+NUM_WALLS = int(GRID_SIZE * GRID_SIZE * WALL_PERCENT)
+STATE_DIM = 2 + (NUM_VILLAINS * 2) + (NUM_KEYS * 2) + (NUM_WALLS * 2) + 2 + (NUM_PITS * 2)
+ACTION_DIM = 4
+NUM_AGENTS = 1 + NUM_VILLAINS
 
-        self.update_targets(hard=True)
+def flatten_observation(obs):
+    return np.concatenate([
+        pad_array(obs['guardian'], 2),
+        pad_array(obs['villains'], NUM_VILLAINS * 2),
+        pad_array(obs['keys'], NUM_KEYS * 2),
+        pad_array(obs['walls'], NUM_WALLS * 2),
+        pad_array(obs['treasure'], 2),
+        pad_array(obs['pits'], NUM_PITS * 2)
+    ])
 
-    def select_action(self, obs, explore=True):
-        obs = torch.FloatTensor(obs).to(device)
-        logits = self.actor(obs)
-        probs = torch.softmax(logits, dim=-1).cpu().detach().numpy()
-        if explore:
-            action = np.random.choice(self.action_dim, p=probs)
-        else:
-            action = np.argmax(probs)
-        return action
+BATCH_SIZE = 128
+BUFFER_CAPACITY = 100000
+NUM_EPISODES = 50
+MAX_STEPS = 20
+GAMMA = 0.99
+TAU = 0.01
+EPS_START = 1.0
+EPS_END = 0.01
+EPS_DECAY = 0.995
 
-    def update_targets(self, hard=False):
-        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-            target_param.data.copy_(param.data if hard else self.tau * param.data + (1 - self.tau) * target_param.data)
+# Main Function: Training with Simulation during Episodes
+# If True, the training loop will render the environment at each step.
+SIMULATE_DURING_TRAINING = True
 
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(param.data if hard else self.tau * param.data + (1 - self.tau) * target_param.data)
+def main():
+    # Create the training environment with rendering enabled for simulation.
+    env = TreasureGuardianEnv(
+        grid_size=GRID_SIZE,
+        num_villains=NUM_VILLAINS,
+        num_keys=NUM_KEYS,
+        num_pits=NUM_PITS,
+        wall_percentage=WALL_PERCENT,
+        render_mode="human" if SIMULATE_DURING_TRAINING else None,
+        max_steps=MAX_STEPS
+    )
 
-# MADDPG Trainer
-class MADDPG:
-    def __init__(self, env, num_agents, buffer_size=100000, batch_size=1024, update_every=100):
-        self.env = env
-        self.num_agents = num_agents
-        self.batch_size = batch_size
-        self.update_every = update_every
-        self.steps = 0
+    agents = [MADDPGAgent(STATE_DIM, ACTION_DIM, NUM_AGENTS, i) for i in range(NUM_AGENTS)]
+    buffer = ReplayBuffer(BUFFER_CAPACITY)
+    epsilon = EPS_START
 
-        # ✅ Use proper keys based on observation space structure
-        guardian_obs_dim = env.observation_space["guardian"].shape[0]
-        villain_obs_dim = env.observation_space["villains"].shape[1]  # shape = (num_villains, obs_dim)
-        guardian_act_dim = env.action_space["guardian"].n
-        villain_act_dim = env.action_space["villains"].nvec[0]
+    for episode in range(NUM_EPISODES):
+        obs, _ = env.reset()
+        state = flatten_observation(obs)
+        episode_rewards = [0] * NUM_AGENTS
 
-        obs_dims = [guardian_obs_dim] + [villain_obs_dim] * (num_agents - 1)
-        action_dims = [guardian_act_dim] + [villain_act_dim] * (num_agents - 1)
+        for step in range(MAX_STEPS):
+            actions = [agent.act(state, epsilon) for agent in agents]
+            env_action = {
+                "guardian": actions[0],
+                "villains": np.array(actions[1:])
+            }
+            next_obs, (g_reward, v_reward), done, _ = env.step(env_action)
+            next_state = flatten_observation(next_obs)
+            rewards = [g_reward] + [v_reward] * NUM_VILLAINS
+            buffer.push(state, actions, rewards, next_state, done)
+            state = next_state
+            for i in range(NUM_AGENTS):
+                episode_rewards[i] += rewards[i]
 
-        total_obs_dim = sum(obs_dims)
-        total_action_dim = sum(action_dims)
+            # Render simulation during training (if flag is True).
+            if SIMULATE_DURING_TRAINING:
+                env.render()
+                # You may adjust the sleep delay if needed.
+                time.sleep(0.05)
 
-        self.agents = [
-            Agent(obs_dims[i], action_dims[i], total_obs_dim, total_action_dim)
-            for i in range(num_agents)
-        ]
+            if len(buffer) >= BATCH_SIZE:
+                states, actions_sample, rewards_sample, next_states, dones = buffer.sample(BATCH_SIZE)
+                states = torch.FloatTensor(states)
+                actions_sample = torch.LongTensor(actions_sample)
+                rewards_sample = torch.FloatTensor(rewards_sample)
+                next_states = torch.FloatTensor(next_states)
+                dones = torch.FloatTensor(dones)
 
-        self.buffer = ReplayBuffer(buffer_size)
+                for agent in agents:
+                    actions_onehot = torch.zeros(BATCH_SIZE, NUM_AGENTS * ACTION_DIM)
+                    for i in range(NUM_AGENTS):
+                        actions_onehot[:, i * ACTION_DIM:(i+1)*ACTION_DIM] = F.one_hot(
+                            actions_sample[:, i], num_classes=ACTION_DIM).float()
 
-    def act(self, obs, explore=True):
-        """
-        obs: List or array of observations for each agent, length = num_agents
-        Returns: List of actions for each agent
-        """
-        actions = []
-        for i, agent in enumerate(self.agents):
-            obs_tensor = torch.tensor(obs[i], dtype=torch.float32).unsqueeze(0).to(device)
-            logits = agent.actor(obs_tensor)
-            probs = torch.softmax(logits, dim=-1)
-            if explore:
-                action = torch.multinomial(probs, 1).item()
-            else:
-                action = torch.argmax(probs, dim=-1).item()
-            actions.append(action)
-        return actions
+                    with torch.no_grad():
+                        target_actions = []
+                        for a in agents:
+                            target_probs = a.actor_target(next_states)
+                            target_acts = F.one_hot(torch.argmax(target_probs, dim=1),
+                                                    num_classes=ACTION_DIM).float()
+                            target_actions.append(target_acts)
+                        target_actions = torch.cat(target_actions, dim=1)
+                        q_next = agent.critic_target(next_states, target_actions)
+                        q_target = rewards_sample[:, agent.agent_idx] + GAMMA * (1 - dones) * q_next.squeeze()
 
+                    current_q = agent.critic(states, actions_onehot)
+                    critic_loss = F.mse_loss(current_q.squeeze(), q_target)
+                    agent.critic_optim.zero_grad()
+                    critic_loss.backward()
+                    agent.critic_optim.step()
 
-    def step(self, obs, actions, rewards, next_obs, dones):
-        self.buffer.push(obs, actions, rewards, next_obs, dones)
-        self.steps += 1
+                    probs = agent.actor(states)
+                    current_acts = F.one_hot(torch.argmax(probs, dim=1), num_classes=ACTION_DIM).float()
+                    new_actions = actions_onehot.clone()
+                    new_actions[:, agent.agent_idx * ACTION_DIM:(agent.agent_idx+1)*ACTION_DIM] = current_acts
+                    actor_loss = -agent.critic(states, new_actions).mean()
+                    agent.actor_optim.zero_grad()
+                    actor_loss.backward()
+                    agent.actor_optim.step()
 
-        if len(self.buffer) > self.batch_size and self.steps % self.update_every == 0:
-            for agent_idx in range(self.num_agents):
-                self.update(agent_idx)
+                    for param, target_param in zip(agent.actor.parameters(), agent.actor_target.parameters()):
+                        target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+                    for param, target_param in zip(agent.critic.parameters(), agent.critic_target.parameters()):
+                        target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
+            
+            if done:
+                break
 
-    def update(self, agent_idx):
-        obs, actions, rewards, next_obs, dones = self.buffer.sample(self.batch_size)
+        epsilon = max(EPS_END, epsilon * EPS_DECAY)
+        print(f"Episode {episode+1}/{NUM_EPISODES}")
+        print(f"Guardian Reward: {episode_rewards[0]:.2f}")
+        print(f"Villains Reward: {sum(episode_rewards[1:]):.2f}")
+        print(f"Epsilon: {epsilon:.3f}\n")
 
-        obs = torch.FloatTensor(obs).to(device)
-        actions = torch.LongTensor(actions).to(device)
-        rewards = torch.FloatTensor(rewards).to(device)
-        next_obs = torch.FloatTensor(next_obs).to(device)
-        dones = torch.FloatTensor(dones).to(device)
+    for i, agent in enumerate(agents):
+        torch.save(agent.actor.state_dict(), f"agent_{i}_actor.pth")
+        torch.save(agent.critic.state_dict(), f"agent_{i}_critic.pth")
+    env.close()
 
-        agent = self.agents[agent_idx]
-        all_obs = obs.reshape(self.batch_size, -1)
-        all_next_obs = next_obs.reshape(self.batch_size, -1)
-
-        # Current joint action one-hot
-        all_actions = []
-        for i, a in enumerate(actions.T):
-            one_hot = torch.nn.functional.one_hot(a, num_classes=self.agents[i].action_dim).float()
-            all_actions.append(one_hot)
-        all_actions_tensor = torch.cat(all_actions, dim=-1)
-
-        # Next joint action (from target actors)
-        all_next_actions = []
-        for i, ag in enumerate(self.agents):
-            logits = ag.target_actor(next_obs[:, i, :])
-            probs = torch.softmax(logits, dim=-1)
-            a = torch.multinomial(probs, 1).squeeze(1)
-            one_hot = torch.nn.functional.one_hot(a, num_classes=ag.action_dim).float()
-            all_next_actions.append(one_hot)
-        all_next_actions_tensor = torch.cat(all_next_actions, dim=-1)
-
-        # Critic loss
-        with torch.no_grad():
-            target_q = agent.target_critic(all_next_obs, all_next_actions_tensor)
-            y = rewards[:, agent_idx].unsqueeze(1) + agent.gamma * target_q * (1 - dones[:, agent_idx].unsqueeze(1))
-
-        current_q = agent.critic(all_obs, all_actions_tensor)
-        critic_loss = nn.MSELoss()(current_q, y)
-
-        agent.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        agent.critic_optimizer.step()
-
-        # Actor loss
-        logits = agent.actor(obs[:, agent_idx, :])
-        probs = torch.softmax(logits, dim=-1)
-        sampled_action = torch.multinomial(probs, 1).squeeze(1)
-        one_hot_action = torch.nn.functional.one_hot(sampled_action, num_classes=agent.action_dim).float()
-
-        all_actions[agent_idx] = one_hot_action
-        new_all_actions_tensor = torch.cat(all_actions, dim=-1)
-
-        actor_loss = -agent.critic(all_obs, new_all_actions_tensor).mean()
-
-        agent.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        agent.actor_optimizer.step()
-
-        # Soft update targets
-        agent.update_targets()
-
+if __name__ == "__main__":
+    main()
